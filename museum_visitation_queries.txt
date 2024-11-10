@@ -1,0 +1,102 @@
+--listing unique exhibits based on mac addresses
+create table erm.erm.exhibits as 
+----------
+with macs as 
+(
+    select mac_address
+    from erm.erm.logs
+    group by 1
+)
+
+select mac_address, 'exhibit no ' || rnum as label from 
+(
+    select mac_address, row_number() over (order by 1) as rnum
+    from macs
+);
+----------------------------------------------------------------------------------
+--listing unique tickets based on ticket_id
+create table erm.erm.tickets as 
+----------
+with ticks as 
+(
+    select ticket_id
+    from erm.erm.logs
+    group by 1
+)
+
+select ticket_id, 'ticket no ' || rnum as label from 
+(
+    select ticket_id, row_number() over (order by 1) as rnum
+    from ticks
+);
+------------------------------------------------------------------------------------
+alter table erm.erm.logs rename to logs_raw;
+------------------------------------------------------------------------------------
+create or replace table erm.erm.visits as 
+select 
+mac_address,
+reader_id,
+ticket_id, 
+timestamp,
+date, 
+dayname(date) as dayname,
+case when dayname IN ('Sat', 'Sun') then 'weekend' else 'weekday' end as daytype,
+dense_rank() over (order by ticket_id, date) as visit_id,
+exhibit_seq,
+max(exhibit_seq) OVER (partition by ticket_id, date) as exhibits_cnt,
+min(timestamp) OVER (partition by ticket_id, date) as visit_start,
+max(timestamp) OVER (partition by ticket_id, date) as visit_end,
+TIMESTAMPDIFF(minute, visit_start, visit_end) as visit_duration_mins
+from 
+(
+    select 
+    mac_address, reader_id, ticket_id, timestamp, 
+    TO_DATE(timestamp) as date,
+    row_number() over (partition by ticket_id, date order by timestamp asc) as exhibit_seq
+    from ERM.ERM.LOGS_RAW
+);
+------------------------------------------------------------------------------------
+--data quality check - ensuring that all visits happen on same date
+select * from erm.erm.visits
+where to_date(visit_start) <> to_date(visit_end)
+------------------------------------------------------------------------------------
+create or replace table erm.erm.visits_aggregated as
+select
+visit_id,
+date,
+dayname, 
+daytype,
+exhibits_cnt,
+visit_start,
+visit_end,
+visit_duration_mins
+from erm.erm.visits
+group by all;
+------------------------------------------------------------------------------------
+--we can't really create all visitation paths - so for now just taking a look at start/end paths
+create or replace table erm.erm.start_end_paths as
+select * from 
+(
+        select 
+        visit_id, 
+        date,
+        dayname,
+        daytype,
+        max(exhibit_first) over (partition by visit_id) as exhibit_first,
+        max(exhibit_last) over (partition by visit_id) as exhibit_last
+        from
+        (
+                select 
+                visit_id,
+                mac_address,
+                timestamp,
+                date,
+                dayname,
+                daytype,
+                case when exhibit_seq = exhibits_cnt then mac_address end as exhibit_last,
+                case when exhibit_seq = 1 then mac_address end as exhibit_first 
+                from  erm.erm.visits
+                where exhibit_seq = 1 --first exhibit
+                or exhibit_seq = exhibits_cnt --last exhibit
+        )ds
+) group by all
